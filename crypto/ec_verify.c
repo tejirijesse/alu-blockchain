@@ -13,7 +13,6 @@
 int ec_verify(EC_KEY const *key, uint8_t const *msg,
 	size_t msglen, sig_t const *sig)
 {
-	uint8_t hash[SHA256_DIGEST_LENGTH];
 	int ret, size;
 
 	if (!key || !msg || !sig)
@@ -24,8 +23,7 @@ int ec_verify(EC_KEY const *key, uint8_t const *msg,
 	if (size <= 0 || sig->len > (size_t)size)
 		return (0);
 
-	sha256((int8_t const *)msg, msglen, hash);
-	ret = ECDSA_verify(0, hash, SHA256_DIGEST_LENGTH, sig->sig, sig->len,
+	ret = ECDSA_verify(0, msg, msglen, sig->sig, sig->len,
 		(EC_KEY *)key);
 
 	return (ret == 1);
