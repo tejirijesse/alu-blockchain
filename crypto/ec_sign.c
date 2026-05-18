@@ -13,16 +13,15 @@
 uint8_t *ec_sign(EC_KEY const *key, uint8_t const *msg,
 	size_t msglen, sig_t *sig)
 {
-	unsigned int sig_len;
+	unsigned int len;
 
 	if (!key || !msg || !sig)
 		return (NULL);
 
-	sig_len = SIG_MAX_LEN;
-	if (!ECDSA_sign(0, msg, msglen, sig->sig, &sig_len,
-		(EC_KEY *)key))
+	len = sig->len;
+	if (ECDSA_sign(0, msg, msglen, sig->sig, &len, (EC_KEY *)key) != 1)
 		return (NULL);
 
-	sig->len = sig_len;
+	sig->len = len;
 	return (sig->sig);
 }
