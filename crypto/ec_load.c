@@ -41,16 +41,16 @@ EC_KEY *ec_load(char const *folder)
 		return (NULL);
 
 	len = strlen(folder);
-	priv_path = malloc(len + strlen("/key.pem") + 1);
-	pub_path = malloc(len + strlen("/key_pub.pem") + 1);
+	priv_path = malloc(len + strlen("/") + strlen(PRI_FILENAME) + 1);
+	pub_path = malloc(len + strlen("/") + strlen(PUB_FILENAME) + 1);
 	if (!priv_path || !pub_path)
 	{
 		free(priv_path);
 		free(pub_path);
 		return (NULL);
 	}
-	sprintf(priv_path, "%s/key.pem", folder);
-	sprintf(pub_path, "%s/key_pub.pem", folder);
+	sprintf(priv_path, "%s/%s", folder, PRI_FILENAME);
+	sprintf(pub_path, "%s/%s", folder, PUB_FILENAME);
 
 	fp = fopen(priv_path, "r");
 	if (!fp)

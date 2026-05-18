@@ -71,8 +71,8 @@ int ec_save(EC_KEY *key, char const *folder)
 	}
 
 	len = strlen(folder);
-	priv_path = malloc(len + strlen("/key.pem") + 1);
-	pub_path = malloc(len + strlen("/key_pub.pem") + 1);
+	priv_path = malloc(len + strlen("/") + strlen(PRI_FILENAME) + 1);
+	pub_path = malloc(len + strlen("/") + strlen(PUB_FILENAME) + 1);
 	if (!priv_path || !pub_path)
 	{
 		free(priv_path);
@@ -80,8 +80,8 @@ int ec_save(EC_KEY *key, char const *folder)
 		return (0);
 	}
 
-	sprintf(priv_path, "%s/key.pem", folder);
-	sprintf(pub_path, "%s/key_pub.pem", folder);
+	sprintf(priv_path, "%s/%s", folder, PRI_FILENAME);
+	sprintf(pub_path, "%s/%s", folder, PUB_FILENAME);
 	ret = write_private_key(key, priv_path) && write_public_key(key, pub_path);
 
 	free(priv_path);
