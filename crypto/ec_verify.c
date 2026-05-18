@@ -14,11 +14,14 @@ int ec_verify(EC_KEY const *key, uint8_t const *msg,
 	size_t msglen, sig_t const *sig)
 {
 	uint8_t hash[SHA256_DIGEST_LENGTH];
-	int ret;
+	int ret, size;
 
 	if (!key || !msg || !sig)
 		return (0);
 	if (sig->len == 0 || sig->len > SIG_MAX_LEN)
+		return (0);
+	size = ECDSA_size((EC_KEY *)key);
+	if (size <= 0 || sig->len > (size_t)size)
 		return (0);
 
 	sha256((int8_t const *)msg, msglen, hash);
