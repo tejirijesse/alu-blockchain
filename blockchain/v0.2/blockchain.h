@@ -17,7 +17,7 @@
 
 #define BLOCKCHAIN_DATA_MAX 1024
 #define HBLK_MAGIC "HBLK"
-#define HBLK_VERSION "0.1"
+#define HBLK_VERSION "0.2"
 #define BLOCK_GENERATION_INTERVAL 1
 #define DIFFICULTY_ADJUSTMENT_INTERVAL 5
 
@@ -131,4 +131,3 @@ void _blockchain_destroy(blockchain_t *blockchain);
 void _blockchain_print(blockchain_t const *blockchain);
 
 #endif /* BLOCKCHAIN_H */
-
