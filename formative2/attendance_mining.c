@@ -4,7 +4,7 @@
 #include <string.h>
 #include <time.h>
 
-#define MAX_STUDENTS 4
+#define MAX_STUDENTS 64
 #define MAX_NAME 32
 #define MAX_COURSE 32
 #define HASH_HEX 65
@@ -14,6 +14,8 @@
 #define BLOCK_REWARD 25
 #define CLOUD_REWARD 18
 #define CLOUD_FEE 12
+#define SECRET_KEY "alu-blockchain-secret-v2"
+#define GENESIS_HASH "0000000000000000000000000000000000000000000000000000000000000000"
 
 typedef enum model_e
 {
@@ -35,6 +37,7 @@ typedef struct student_s
 {
 	char id[16];
 	char name[MAX_NAME];
+	char course[MAX_COURSE];
 	int balance;
 	unsigned int nonce;
 	history_t *history;
@@ -51,6 +54,7 @@ typedef struct utxo_s
 
 typedef struct attendance_s
 {
+	int index;
 	char student_id[16];
 	char student_name[MAX_NAME];
 	char course[MAX_COURSE];
@@ -58,6 +62,8 @@ typedef struct attendance_s
 	char timestamp[32];
 	int token_reward;
 	char tx_id[HASH_HEX];
+	char previous_hash[HASH_HEX];
+	char signature[HASH_HEX];
 	unsigned int nonce;
 	char hash[HASH_HEX];
 	struct attendance_s *next;
@@ -66,9 +72,12 @@ typedef struct attendance_s
 typedef struct app_s
 {
 	student_t students[MAX_STUDENTS];
+	int num_students;
 	utxo_t *utxos;
 	attendance_t *pending;
 	attendance_t *confirmed;
+	char last_hash[HASH_HEX];
+	int next_block_index;
 	model_t model;
 	int difficulty;
 	int next_utxo;
@@ -216,11 +225,47 @@ static void sha256_hex(const char *input, char out[HASH_HEX])
 	out[64] = '\0';
 }
 
+/*
+ * compute_signature - bind a confirmed attendance record to a system secret
+ * using an HMAC-style SHA-256 commitment so any field change invalidates it.
+ */
+static void compute_signature(attendance_t *record)
+{
+	char data[512];
+
+	snprintf(data, sizeof(data),
+		"%d|%s|%s|%s|%s|%s|%d|%s|%s|%s",
+		record->index, record->student_id, record->student_name,
+		record->course, record->status, record->timestamp,
+		record->token_reward, record->tx_id, record->previous_hash,
+		SECRET_KEY);
+	sha256_hex(data, record->signature);
+}
+
+/*
+ * verify_signature - recompute the expected signature and compare.
+ * Returns 1 when the stored signature matches the current contents.
+ */
+static int verify_signature(const attendance_t *record)
+{
+	char data[512];
+	char expected[HASH_HEX];
+
+	snprintf(data, sizeof(data),
+		"%d|%s|%s|%s|%s|%s|%d|%s|%s|%s",
+		record->index, record->student_id, record->student_name,
+		record->course, record->status, record->timestamp,
+		record->token_reward, record->tx_id, record->previous_hash,
+		SECRET_KEY);
+	sha256_hex(data, expected);
+	return (strcmp(expected, record->signature) == 0);
+}
+
 static student_t *find_student(app_t *app, const char *id)
 {
 	int i;
 
-	for (i = 0; i < MAX_STUDENTS; i++)
+	for (i = 0; i < app->num_students; i++)
 		if (strcmp(app->students[i].id, id) == 0)
 			return (&app->students[i]);
 	return (NULL);
@@ -313,7 +358,7 @@ static void print_balances(app_t *app)
 
 	printf("\nStudent balances using %s model:\n",
 		app->model == MODEL_UTXO ? "UTXO" : "account");
-	for (i = 0; i < MAX_STUDENTS; i++)
+	for (i = 0; i < app->num_students; i++)
 	{
 		balance = app->model == MODEL_UTXO ?
 			utxo_balance(app, app->students[i].id) : app->students[i].balance;
@@ -343,26 +388,24 @@ static void make_timestamp(char out[32])
 
 static void mark_attendance(app_t *app)
 {
-	attendance_t *record;
+	attendance_t *record, **tail;
 	student_t *student;
-	char id[16], course[MAX_COURSE], status[12], data[256];
+	char id[16], status[12], data[256];
 
-	printf("Student ID (S001-S004): ");
+	printf("Student ID: ");
 	scanf("%15s", id);
 	student = find_student(app, id);
 	if (!student)
 	{
-		printf("Unknown student.\n");
+		printf("ERROR: Student ID not found\n");
 		return;
 	}
-	printf("Course: ");
-	scanf("%31s", course);
 	printf("Status (PRESENT/LATE/ABSENT): ");
 	scanf("%11s", status);
 	if (strcmp(status, "PRESENT") && strcmp(status, "LATE") &&
 		strcmp(status, "ABSENT"))
 	{
-		printf("Invalid status.\n");
+		printf("Invalid status. Choose PRESENT, LATE or ABSENT.\n");
 		return;
 	}
 	record = calloc(1, sizeof(*record));
@@ -370,7 +413,7 @@ static void mark_attendance(app_t *app)
 		return;
 	strcpy(record->student_id, student->id);
 	strcpy(record->student_name, student->name);
-	strcpy(record->course, course);
+	strncpy(record->course, student->course, MAX_COURSE - 1);
 	strcpy(record->status, status);
 	make_timestamp(record->timestamp);
 	record->token_reward = reward_for_status(status);
@@ -378,10 +421,19 @@ static void mark_attendance(app_t *app)
 		record->course, record->status, record->timestamp,
 		record->token_reward);
 	sha256_hex(data, record->tx_id);
-	record->next = app->pending;
-	app->pending = record;
-	printf("Attendance placed in pending pool. Transaction reward=%d tx=%.12s\n",
-		record->token_reward, record->tx_id);
+	/* placeholders until mining assigns the real position and link */
+	strcpy(record->previous_hash, GENESIS_HASH);
+	record->index = -1;
+	/* append to the tail so pending order matches the order of marking */
+	record->next = NULL;
+	tail = &app->pending;
+	while (*tail)
+		tail = &((*tail)->next);
+	*tail = record;
+	printf("Attendance placed in pending pool. tx=%.12s reward=%d\n",
+		record->tx_id, record->token_reward);
+	if (record->token_reward == 0)
+		printf("ABSENT recorded: no token transaction generated.\n");
 }
 
 static void print_pending(app_t *app)
@@ -405,6 +457,11 @@ static int hash_meets_difficulty(const char *hash, int difficulty)
 	return (1);
 }
 
+/*
+ * mine_record - run proof of work over the block's signed fields.
+ * The hash input includes index, previous_hash and signature so the chain
+ * is bound together and any tampering re-mining requires the secret.
+ */
 static unsigned long mine_record(attendance_t *record, int difficulty)
 {
 	char data[512];
@@ -415,29 +472,70 @@ static unsigned long mine_record(attendance_t *record, int difficulty)
 	do {
 		record->nonce++;
 		attempts++;
-		snprintf(data, sizeof(data), "%s:%s:%s:%s:%d:%s:%u",
-			record->student_id, record->course, record->status,
-			record->timestamp, record->token_reward, record->tx_id,
+		snprintf(data, sizeof(data),
+			"%d|%s|%s|%s|%s|%d|%s|%s|%s|%u",
+			record->index, record->student_id, record->course,
+			record->status, record->timestamp, record->token_reward,
+			record->tx_id, record->previous_hash, record->signature,
 			record->nonce);
 		sha256_hex(data, record->hash);
 	} while (!hash_meets_difficulty(record->hash, difficulty));
 	return (attempts);
 }
 
+/*
+ * prepare_and_mine - assign the chain position, link to the previous
+ * confirmed hash, sign the block and then run proof of work.
+ */
+static unsigned long prepare_and_mine(app_t *app, attendance_t *record)
+{
+	unsigned long attempts;
+
+	record->index = app->next_block_index++;
+	strcpy(record->previous_hash, app->last_hash);
+	compute_signature(record);
+	attempts = mine_record(record, app->difficulty);
+	strcpy(app->last_hash, record->hash);
+	return (attempts);
+}
+
+/*
+ * recompute_block_hash - reproduce the PoW hash input for chain validation.
+ */
+static void recompute_block_hash(const attendance_t *record, char out[HASH_HEX])
+{
+	char data[512];
+
+	snprintf(data, sizeof(data),
+		"%d|%s|%s|%s|%s|%d|%s|%s|%s|%u",
+		record->index, record->student_id, record->course,
+		record->status, record->timestamp, record->token_reward,
+		record->tx_id, record->previous_hash, record->signature,
+		record->nonce);
+	sha256_hex(data, out);
+}
+
 static void confirm_all(app_t *app, const char *method)
 {
-	attendance_t *node, *next;
+	attendance_t *node, *next, **tail;
 
 	node = app->pending;
 	while (node)
 	{
 		next = node->next;
 		apply_reward(app, node);
-		node->next = app->confirmed;
-		app->confirmed = node;
-		printf("Confirmed by %s: %s %s %s reward=%d valid_signature=yes\n",
-			method, node->student_name, node->course, node->status,
-			node->token_reward);
+		/* append at the tail of the confirmed list to keep chain order */
+		node->next = NULL;
+		tail = &app->confirmed;
+		while (*tail)
+			tail = &((*tail)->next);
+		*tail = node;
+		printf("Confirmed by %s: block=%d %s %s %s reward=%d signature=%s\n",
+			method, node->index, node->student_name, node->course,
+			node->status, node->token_reward,
+			verify_signature(node) ? "VALID" : "INVALID");
+		if (app->model == MODEL_UTXO)
+			print_utxos(app);
 		node = next;
 	}
 	app->pending = NULL;
@@ -453,13 +551,15 @@ static void solo_mine(app_t *app)
 		printf("No pending attendance blocks.\n");
 		return;
 	}
+	printf("Solo mining at difficulty %d (hash must start with %d zero(s))\n",
+		app->difficulty, app->difficulty);
 	total = 0;
 	for (node = app->pending; node; node = node->next)
 	{
-		attempts = mine_record(node, app->difficulty);
+		attempts = prepare_and_mine(app, node);
 		total += attempts;
-		printf("Solo mined %.12s attempts=%lu hash=%s\n",
-			node->tx_id, attempts, node->hash);
+		printf("Solo mined block #%d tx=%.12s attempts=%lu hash=%s\n",
+			node->index, node->tx_id, attempts, node->hash);
 	}
 	printf("Solo miner reward=%d total_attempts=%lu\n", BLOCK_REWARD, total);
 	confirm_all(app, "solo mining");
@@ -467,8 +567,8 @@ static void solo_mine(app_t *app)
 
 static void pool_mine(app_t *app)
 {
-	int i, miners, rates[5], attempts[5], total, reward_pool;
-	double percent, reward;
+	int i, miners, rates[5], attempts[5], total;
+	double percent, reward, reward_pool, pool_fee, distributed;
 	attendance_t *node;
 
 	if (!app->pending)
@@ -486,23 +586,32 @@ static void pool_mine(app_t *app)
 		total += attempts[i];
 	}
 	for (node = app->pending; node; node = node->next)
-		mine_record(node, app->difficulty);
-	reward_pool = BLOCK_REWARD - (BLOCK_REWARD * 2 / 100);
-	printf("\nPool mining rewards after 2%% pool fee:\n");
-	printf("Miner | Attempts | Share %% | Reward\n");
+		prepare_and_mine(app, node);
+	pool_fee = BLOCK_REWARD * 0.02;
+	reward_pool = BLOCK_REWARD - pool_fee;
+	printf("\nPool mining (block reward=%d, pool fee=2%%=%.2f, pool=%.2f):\n",
+		BLOCK_REWARD, pool_fee, reward_pool);
+	printf("Miner | Attempts | Share %%  | Reward\n");
+	printf("------+----------+----------+--------\n");
+	distributed = 0.0;
 	for (i = 0; i < miners; i++)
 	{
 		percent = total ? (attempts[i] * 100.0 / total) : 0.0;
 		reward = reward_pool * percent / 100.0;
-		printf("M%-5d| %-9d| %6.2f | %6.2f\n",
+		distributed += reward;
+		printf("M%-5d| %-9d|  %6.2f  | %6.2f\n",
 			i + 1, attempts[i], percent, reward);
 	}
+	printf("Total distributed=%.2f  retained_by_pool=%.2f\n",
+		distributed, BLOCK_REWARD - distributed);
 	confirm_all(app, "pool mining");
 }
 
 static void cloud_mine(app_t *app)
 {
-	int rounds, i, fees, gross;
+	int rounds, i, fees, gross, rental_fee;
+	unsigned long attempts, total_attempts;
+	attendance_t *node;
 
 	if (!app->pending)
 	{
@@ -515,11 +624,18 @@ static void cloud_mine(app_t *app)
 		rounds = 1;
 	if (rounds > 5)
 		rounds = 5;
+	printf("Rental fee per round (try %d profitable, %d unprofitable): ",
+		CLOUD_FEE, CLOUD_REWARD + 4);
+	scanf("%d", &rental_fee);
+	if (rental_fee < 0)
+		rental_fee = 0;
 	fees = 0;
 	gross = 0;
+	printf("Cloud reward per round=%d, rental fee per round=%d\n",
+		CLOUD_REWARD, rental_fee);
 	for (i = 1; i <= rounds; i++)
 	{
-		fees += CLOUD_FEE;
+		fees += rental_fee;
 		gross += CLOUD_REWARD;
 		printf("Round %d gross=%d fees=%d net=%d\n",
 			i, gross, fees, gross - fees);
@@ -528,7 +644,17 @@ static void cloud_mine(app_t *app)
 	}
 	printf("Cloud mining summary gross=%d total_fees=%d net_profit=%d\n",
 		gross, fees, gross - fees);
-	solo_mine(app);
+	/* The rented hash power confirms the pending blocks via PoW. */
+	total_attempts = 0;
+	for (node = app->pending; node; node = node->next)
+	{
+		attempts = prepare_and_mine(app, node);
+		total_attempts += attempts;
+		printf("Cloud rig confirmed block #%d tx=%.12s attempts=%lu\n",
+			node->index, node->tx_id, attempts);
+	}
+	printf("Cloud miner total_attempts=%lu\n", total_attempts);
+	confirm_all(app, "cloud mining");
 }
 
 static void transfer_utxo(app_t *app, const char *sender, const char *receiver,
@@ -637,10 +763,12 @@ static void print_confirmed(app_t *app)
 
 	printf("\nConfirmed attendance records:\n");
 	for (node = app->confirmed; node; node = node->next)
-		printf("  %s %-10s course=%s status=%s time=%s reward=%d "
-			"tx=%.12s signature_valid=yes\n",
-			node->student_id, node->student_name, node->course,
-			node->status, node->timestamp, node->token_reward, node->tx_id);
+		printf("  [#%d] %s %-10s course=%s status=%s time=%s reward=%d "
+			"tx=%.12s prev=%.12s hash=%.12s signature=%s\n",
+			node->index, node->student_id, node->student_name,
+			node->course, node->status, node->timestamp,
+			node->token_reward, node->tx_id, node->previous_hash,
+			node->hash, verify_signature(node) ? "VALID" : "INVALID");
 }
 
 static void init_app(app_t *app)
@@ -648,14 +776,157 @@ static void init_app(app_t *app)
 	memset(app, 0, sizeof(*app));
 	strcpy(app->students[0].id, "S001");
 	strcpy(app->students[0].name, "Alice");
+	strcpy(app->students[0].course, "BLK101");
 	strcpy(app->students[1].id, "S002");
 	strcpy(app->students[1].name, "Bob");
+	strcpy(app->students[1].course, "BLK101");
 	strcpy(app->students[2].id, "S003");
 	strcpy(app->students[2].name, "Chantal");
+	strcpy(app->students[2].course, "BLK101");
 	strcpy(app->students[3].id, "S004");
 	strcpy(app->students[3].name, "David");
+	strcpy(app->students[3].course, "BLK101");
+	app->num_students = 4;
 	app->model = MODEL_UTXO;
 	app->difficulty = 2;
+	strcpy(app->last_hash, GENESIS_HASH);
+	app->next_block_index = 0;
+}
+
+/*
+ * load_registry - read a students.txt file with one record per line in the
+ * format student_id,full_name,course_code. Replaces the default roster on
+ * success. Returns the number of records loaded or 0 on missing/empty file.
+ */
+static int load_registry(app_t *app, const char *path)
+{
+	FILE *fp;
+	char line[256];
+	int count;
+	char *id, *name, *course;
+
+	fp = fopen(path, "r");
+	if (!fp)
+		return (0);
+	count = 0;
+	while (count < MAX_STUDENTS && fgets(line, sizeof(line), fp))
+	{
+		line[strcspn(line, "\r\n")] = '\0';
+		if (line[0] == '\0' || line[0] == '#')
+			continue;
+		id = strtok(line, ",");
+		name = strtok(NULL, ",");
+		course = strtok(NULL, ",");
+		if (!id || !name || !course)
+			continue;
+		while (*id == ' ' || *id == '\t') id++;
+		while (*name == ' ' || *name == '\t') name++;
+		while (*course == ' ' || *course == '\t') course++;
+		memset(&app->students[count], 0, sizeof(app->students[count]));
+		strncpy(app->students[count].id, id,
+			sizeof(app->students[count].id) - 1);
+		strncpy(app->students[count].name, name,
+			sizeof(app->students[count].name) - 1);
+		strncpy(app->students[count].course, course,
+			sizeof(app->students[count].course) - 1);
+		count++;
+	}
+	fclose(fp);
+	if (count > 0)
+		app->num_students = count;
+	return (count);
+}
+
+/*
+ * validate_chain - walk the confirmed chain verifying each block's hash,
+ * signature, link to the previous block and PoW difficulty.
+ */
+static void validate_chain(app_t *app)
+{
+	attendance_t *node;
+	const char *prev_hash;
+	char recomputed[HASH_HEX];
+	int problems;
+
+	printf("\nValidating confirmed chain...\n");
+	if (!app->confirmed)
+	{
+		printf("Chain is empty (no confirmed blocks yet).\n");
+		return;
+	}
+	problems = 0;
+	prev_hash = GENESIS_HASH;
+	for (node = app->confirmed; node; node = node->next)
+	{
+		recompute_block_hash(node, recomputed);
+		if (strcmp(recomputed, node->hash) != 0)
+		{
+			printf("  [Block %d] TAMPERED: stored hash does not match contents\n",
+				node->index);
+			problems++;
+		}
+		if (!verify_signature(node))
+		{
+			printf("  [Block %d] TAMPERED: signature does not verify\n",
+				node->index);
+			problems++;
+		}
+		if (strcmp(node->previous_hash, prev_hash) != 0)
+		{
+			printf("  [Block %d] BROKEN LINK: previous_hash does not match prior block\n",
+				node->index);
+			problems++;
+		}
+		if (!hash_meets_difficulty(node->hash, app->difficulty))
+			printf("  [Block %d] NOTE: stored hash no longer meets current difficulty %d\n",
+				node->index, app->difficulty);
+		prev_hash = node->hash;
+	}
+	if (problems == 0)
+		printf("Chain is VALID. All hashes, signatures and links verified.\n");
+	else
+		printf("Chain is INVALID: %d problem(s) detected.\n", problems);
+}
+
+/*
+ * tamper_demo - alter a confirmed block in memory (without re-signing or
+ * re-mining) and show that validation catches it. The change is reverted.
+ */
+static void tamper_demo(app_t *app)
+{
+	attendance_t *node;
+	int target, count;
+	char old[12];
+
+	if (!app->confirmed)
+	{
+		printf("Mine at least one block before running the tamper demo.\n");
+		return;
+	}
+	count = 0;
+	for (node = app->confirmed; node; node = node->next)
+		count++;
+	printf("Block index to tamper with (0-%d): ", count - 1);
+	if (scanf("%d", &target) != 1 || target < 0 || target >= count)
+	{
+		printf("Invalid index.\n");
+		return;
+	}
+	node = app->confirmed;
+	while (node && node->index != target)
+		node = node->next;
+	if (!node)
+	{
+		printf("Block not found.\n");
+		return;
+	}
+	strcpy(old, node->status);
+	strcpy(node->status, strcmp(old, "ABSENT") ? "ABSENT" : "PRESENT");
+	printf("Forged block %d status: %s -> %s (hash/signature NOT updated)\n",
+		node->index, old, node->status);
+	validate_chain(app);
+	strcpy(node->status, old);
+	printf("In-memory change reverted.\n");
 }
 
 static void choose_model(app_t *app)
@@ -696,28 +967,49 @@ static void parse_args(app_t *app, int argc, char **argv)
 
 static void menu(void)
 {
-	printf("\n1 Choose transaction model\n");
-	printf("2 Set mining difficulty\n");
-	printf("3 Mark attendance\n");
-	printf("4 Print pending pool\n");
-	printf("5 Solo mine pending pool\n");
-	printf("6 Pool mine pending pool\n");
-	printf("7 Cloud mine pending pool\n");
-	printf("8 Print confirmed attendance\n");
-	printf("9 Print balances\n");
+	printf("\n1  Choose transaction model\n");
+	printf("2  Set mining difficulty\n");
+	printf("3  Mark attendance\n");
+	printf("4  Print pending pool\n");
+	printf("5  Solo mine pending pool\n");
+	printf("6  Pool mine pending pool\n");
+	printf("7  Cloud mine pending pool\n");
+	printf("8  Print confirmed attendance\n");
+	printf("9  Print balances\n");
 	printf("10 Print UTXO set\n");
 	printf("11 Manual token transfer\n");
 	printf("12 Print account history\n");
-	printf("0 Exit\n> ");
+	printf("13 Validate chain integrity\n");
+	printf("14 Tamper detection demo\n");
+	printf("15 List registered students\n");
+	printf("0  Exit\n> ");
+}
+
+static void list_students(app_t *app)
+{
+	int i;
+
+	printf("\nRegistered students (%d):\n", app->num_students);
+	for (i = 0; i < app->num_students; i++)
+		printf("  %-10s %-30s %s\n", app->students[i].id,
+			app->students[i].name, app->students[i].course);
 }
 
 int main(int argc, char **argv)
 {
 	app_t app;
-	int choice, difficulty;
+	int choice, difficulty, loaded;
 
 	init_app(&app);
+	loaded = load_registry(&app, "students.txt");
+	if (loaded == 0)
+		printf("Note: students.txt not found, using built-in roster.\n");
+	else
+		printf("Loaded %d student(s) from students.txt\n", loaded);
 	parse_args(&app, argc, argv);
+	printf("Model=%s difficulty=%d genesis=%.16s...\n",
+		app.model == MODEL_UTXO ? "UTXO" : "account",
+		app.difficulty, app.last_hash);
 	while (1)
 	{
 		menu();
@@ -753,6 +1045,12 @@ int main(int argc, char **argv)
 			manual_transfer(&app);
 		else if (choice == 12)
 			print_history(&app);
+		else if (choice == 13)
+			validate_chain(&app);
+		else if (choice == 14)
+			tamper_demo(&app);
+		else if (choice == 15)
+			list_students(&app);
 	}
 	return (0);
 }

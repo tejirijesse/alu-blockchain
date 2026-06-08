@@ -1,0 +1,13 @@
+# Build artifacts
+*.o
+*.obj
+*.a
+
+# Compiled binaries
+formative2/attendance_mining
+cli/cli
+crypto/crypto
+
+# Editor / OS noise
+.DS_Store
+*~
