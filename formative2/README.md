@@ -5,6 +5,10 @@ pending pool, two ledger models (UTXO and account-based), and three mining
 simulations (solo, pool, cloud). Every block is linked by `previous_hash`,
 signed with an HMAC-SHA-256 commitment, and confirmed via proof of work.
 
+## Demo Video
+
+5–10 minute walkthrough of the system: _link to be added_.
+
 ## Dependencies
 
 None beyond a C99 compiler and `make`. SHA-256 is implemented in
